@@ -16,8 +16,6 @@
 #include <linux/sched/cpufreq.h>
 #include <trace/events/power.h>
 #include <trace/hooks/sched.h>
-#include <linux/suspend.h>
-#include <linux/cpufreq.h>
 #define CREATE_TRACE_POINTS
 #include "uag_trace.h"
 
@@ -67,11 +65,6 @@ static unsigned int default_target_loads[] = {DEFAULT_TARGET_LOAD};
 
 #ifdef CONFIG_OPLUS_UAG_SOFT_LIMIT
 #define DEFAULT_BREAK_FREQ_MARGIN 20
-#endif
-
-/* Fallback in case the platform header doesn't define MAX_CLUSTERS. */
-#ifndef MAX_CLUSTERS
-#define MAX_CLUSTERS 3
 #endif
 
 struct proc_dir_entry *dir;
@@ -751,153 +744,6 @@ void set_soft_limit_freq(struct cpufreq_policy *policy, unsigned int soft_freq)
 	sg_policy->soft_limits_changed = true;
 }
 EXPORT_SYMBOL(set_soft_limit_freq);
-#endif /* CONFIG_OPLUS_UAG_SOFT_LIMIT */
-
-/*
- * Screen-off power saving policy.
- *
- * When the screen is off, the device is typically idle or doing background
- * work (push, sync, audio). In that state we don't need the big cores to ramp
- * up: clamp each cluster via the existing soft_limit mechanism so that the
- * governor cannot select frequencies above a low bar. This keeps the big
- * cluster offline-able and lets the SoC reach deeper C-states.
- *
- * The limits are only applied when soft_limit is compiled in; otherwise the
- * hook is a no-op. Limits are restored verbatim on resume.
- */
-#ifdef CONFIG_OPLUS_UAG_SOFT_LIMIT
-#define UAG_SCREEN_OFF_BIG_SOFT_FREQ	614400	/* kHz, big cluster ceiling when screen off */
-#define UAG_SCREEN_OFF_MID_SOFT_FREQ	960000	/* kHz, mid  cluster ceiling when screen off */
-#define UAG_SCREEN_OFF_LITTLE_SOFT_FREQ	300000	/* kHz, little cluster ceiling when screen off */
-
-static bool uag_screen_off;
-static bool uag_screen_off_active;
-static unsigned int saved_cluster_max_freq[MAX_CLUSTERS];
-
-static unsigned int uag_cluster_soft_limit(int cluster_id)
-{
-	switch (cluster_id) {
-	case 0: return UAG_SCREEN_OFF_LITTLE_SOFT_FREQ;
-	case 1: return UAG_SCREEN_OFF_MID_SOFT_FREQ;
-	case 2: return UAG_SCREEN_OFF_BIG_SOFT_FREQ;
-	default: return 0;
-	}
-}
-
-static void uag_apply_screen_off_limit(bool off)
-{
-	struct cpufreq_policy *policy;
-	unsigned int cpu;
-
-	for_each_possible_cpu(cpu) {
-		struct uag_gov_policy *sg_policy;
-		struct uag_gov_tunables *tunables;
-		int cluster_id;
-		unsigned int target_freq;
-
-		policy = cpufreq_cpu_get(cpu);
-		if (!policy)
-			continue;
-		if (policy->cpu != cpu)
-			goto put;	/* only handle each policy once */
-
-		sg_policy = policy->governor_data;
-		if (!sg_policy)
-			goto put;
-
-		tunables = sg_policy->tunables;
-		if (!tunables)
-			goto put;
-
-		cluster_id = topology_cluster_id(cpu);
-		if (cluster_id < 0 || cluster_id >= MAX_CLUSTERS)
-			goto put;
-
-		if (off) {
-			/* Save current ceiling and clamp down. */
-			saved_cluster_max_freq[cluster_id] = tunables->soft_limit_freq;
-			target_freq = uag_cluster_soft_limit(cluster_id);
-			if (target_freq && target_freq < saved_cluster_max_freq[cluster_id]) {
-				set_soft_limit_freq(policy, target_freq);
-				trace_set_soft_limit_freq(cpu, target_freq,
-							  freq2util(sg_policy, target_freq));
-			}
-		} else {
-			/* Restore. */
-			target_freq = saved_cluster_max_freq[cluster_id];
-			if (target_freq)
-				set_soft_limit_freq(policy, target_freq);
-		}
-put:
-		cpufreq_cpu_put(policy);
-	}
-}
-
-static int uag_pm_notify(struct notifier_block *nb, unsigned long mode, void *_unused)
-{
-	switch (mode) {
-	case PM_SUSPEND_PREPARE:
-	case PM_HIBERNATION_PREPARE:
-	case PM_RESTORE_PREPARE:
-		if (uag_screen_off && !uag_screen_off_active) {
-			uag_apply_screen_off_limit(true);
-			uag_screen_off_active = true;
-			pr_info("screen-off: clamp cpufreq soft_limit\n");
-		}
-		break;
-	case PM_POST_SUSPEND:
-	case PM_POST_HIBERNATION:
-	case PM_POST_RESTORE:
-		if (uag_screen_off_active) {
-			uag_apply_screen_off_limit(false);
-			uag_screen_off_active = false;
-			pr_info("screen-on: restore cpufreq soft_limit\n");
-		}
-		break;
-	default:
-		break;
-	}
-	return 0;
-}
-
-static struct notifier_block uag_pm_nb = {
-	.notifier_call = uag_pm_notify,
-};
-
-/* /proc/uag/screen_off_limit — toggle the screen-off soft_limit policy. */
-static ssize_t screen_off_limit_proc_write(struct file *file, const char __user *buf,
-					   size_t count, loff_t *ppos)
-{
-	char page[32] = {0};
-	int ret, val;
-
-	ret = simple_write_to_buffer(page, sizeof(page) - 1, ppos, buf, count);
-	if (ret <= 0)
-		return -EINVAL;
-
-	ret = sscanf(page, "%d", &val);
-	if (ret != 1)
-		return -EINVAL;
-
-	uag_screen_off = !!val;
-	return count;
-}
-
-static ssize_t screen_off_limit_proc_read(struct file *file, char __user *buf,
-					  size_t count, loff_t *ppos)
-{
-	char page[32] = {0};
-	int len;
-
-	len = scnprintf(page, sizeof(page), "%d\n", uag_screen_off ? 1 : 0);
-	return simple_read_from_buffer(buf, count, ppos, page, len);
-}
-
-static const struct proc_ops screen_off_limit_proc_ops = {
-	.proc_write	= screen_off_limit_proc_write,
-	.proc_read	= screen_off_limit_proc_read,
-	.proc_lseek	= default_llseek,
-};
 #endif /* CONFIG_OPLUS_UAG_SOFT_LIMIT */
 
 #ifdef CONFIG_ARCH_MEDIATEK
@@ -2976,13 +2822,6 @@ static int __init cpufreq_uag_init(void)
 #endif
 	create_is_game_scene_proc_file(dir);
 
-#ifdef CONFIG_OPLUS_UAG_SOFT_LIMIT
-	/* Enable screen-off power-saving policy by default. */
-	uag_screen_off = true;
-	proc_create("screen_off_limit", 0664, dir, &screen_off_limit_proc_ops);
-	register_pm_notifier(&uag_pm_nb);
-#endif
-
 	return ret;
 
 out:
@@ -2992,9 +2831,6 @@ out:
 
 static void __exit cpufreq_uag_exit(void)
 {
-#ifdef CONFIG_OPLUS_UAG_SOFT_LIMIT
-	unregister_pm_notifier(&uag_pm_nb);
-#endif
 	clear_opp_cap_info();
 	unregister_uag_hooks();
 	cpufreq_unregister_governor(&cpufreq_uag_gov);

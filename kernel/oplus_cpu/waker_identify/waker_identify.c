@@ -20,9 +20,6 @@
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <linux/jiffies.h>
-#include <linux/suspend.h>
-#include <linux/pm_wakeup.h>
-#include <linux/sort.h>
 #include "waker_identify.h"
 
 
@@ -842,194 +839,6 @@ static void register_rt_info_vendor_hooks(void)
 }
 #endif
 
-/*
- * Screen-off wakeup-source accounting.
- *
- * This is the foundation for wakeup-source governance: on suspend we
- * snapshot every wakeup_source's event_count; on resume we diff and
- * keep the top-N offenders by event delta during the screen-off
- * period. The result is exposed via
- * /proc/waker_identify/screenoff_ws_stats so that the framework (or
- * a developer) can see exactly which wakeup sources fired the most
- * while the screen was off and deferrable-timer / freeze them
- * accordingly.
- *
- * Unlike the seed-based waker_identify tracking above, this runs
- * unattended on every suspend/resume cycle with no setup needed.
- */
-#define WS_TOP_N		16
-#define WS_NAME_LEN		32
-#define WS_STATS_PAGE_SIZE	2048
-
-struct ws_snapshot {
-	char name[WS_NAME_LEN];
-	unsigned long event_count;
-};
-
-struct ws_temp {
-	char name[WS_NAME_LEN];
-	unsigned long delta;
-};
-
-static struct ws_snapshot ws_before[WS_TOP_N];
-static struct ws_snapshot ws_after[WS_TOP_N];
-static struct ws_temp ws_diff[WS_TOP_N];
-static int ws_diff_count;
-static int ws_n_before;
-static bool ws_screenoff_active;
-static DEFINE_MUTEX(ws_stats_mtx);
-
-static int cmp_ws_delta(const void *a, const void *b)
-{
-	const struct ws_temp *wa = a, *wb = b;
-
-	if (wa->delta > wb->delta)
-		return -1;
-	if (wa->delta < wb->delta)
-		return 1;
-	return 0;
-}
-
-/* Snapshot up to WS_TOP_N wakeup_sources with the highest event_count. */
-static void snapshot_wakeup_sources(struct ws_snapshot *snap, int *out_n)
-{
-	struct wakeup_source *ws;
-	struct ws_temp tmp_arr[64];
-	int n = 0, i, srcuidx;
-
-	srcuidx = wakeup_sources_read_lock();
-	for_each_wakeup_source(ws) {
-		if (n >= 64)
-			break;
-		strscpy(tmp_arr[n].name, ws->name ?: "?", WS_NAME_LEN);
-		tmp_arr[n].delta = ws->event_count;
-		n++;
-	}
-	wakeup_sources_read_unlock(srcuidx);
-
-	if (n == 0) {
-		*out_n = 0;
-		return;
-	}
-
-	sort(tmp_arr, n, sizeof(tmp_arr[0]), cmp_ws_delta, NULL);
-
-	n = min(n, WS_TOP_N);
-	for (i = 0; i < n; i++) {
-		strscpy(snap[i].name, tmp_arr[i].name, WS_NAME_LEN);
-		snap[i].event_count = tmp_arr[i].delta;
-	}
-	*out_n = n;
-}
-
-/* Compute the delta between before/after snapshots into ws_diff. */
-static void diff_wakeup_sources(int n_before, int n_after)
-{
-	int i, j, n = 0;
-
-	memset(ws_diff, 0, sizeof(ws_diff));
-
-	for (i = 0; i < n_after && n < WS_TOP_N; i++) {
-		unsigned long before = 0;
-
-		for (j = 0; j < n_before; j++) {
-			if (!strcmp(ws_before[j].name, ws_after[i].name)) {
-				before = ws_before[j].event_count;
-				break;
-			}
-		}
-		ws_diff[n].delta = ws_after[i].event_count - before;
-		strscpy(ws_diff[n].name, ws_after[i].name, WS_NAME_LEN);
-		n++;
-	}
-
-	/* Re-sort by delta descending. */
-	{
-		struct ws_temp tmp[WS_TOP_N];
-		int k;
-
-		for (k = 0; k < n; k++) {
-			strscpy(tmp[k].name, ws_diff[k].name, WS_NAME_LEN);
-			tmp[k].delta = ws_diff[k].delta;
-		}
-		sort(tmp, n, sizeof(tmp[0]), cmp_ws_delta, NULL);
-		for (k = 0; k < n; k++) {
-			strscpy(ws_diff[k].name, tmp[k].name, WS_NAME_LEN);
-			ws_diff[k].delta = tmp[k].delta;
-		}
-	}
-
-	ws_diff_count = n;
-}
-
-static int waker_pm_notify(struct notifier_block *nb, unsigned long mode, void *_unused)
-{
-	switch (mode) {
-	case PM_SUSPEND_PREPARE:
-		mutex_lock(&ws_stats_mtx);
-		snapshot_wakeup_sources(ws_before, &ws_n_before);
-		ws_screenoff_active = true;
-		mutex_unlock(&ws_stats_mtx);
-		break;
-	case PM_POST_SUSPEND:
-		mutex_lock(&ws_stats_mtx);
-		if (ws_screenoff_active) {
-			int n_after;
-
-			snapshot_wakeup_sources(ws_after, &n_after);
-			diff_wakeup_sources(ws_n_before, n_after);
-			if (ws_diff_count > 0) {
-				int k;
-
-				pr_info("[waker_identify] screen-off wakeup top:\n");
-				for (k = 0; k < ws_diff_count; k++)
-					pr_info("[waker_identify]  %2d. %-24s delta=%lu\n",
-						k + 1, ws_diff[k].name, ws_diff[k].delta);
-			}
-			ws_screenoff_active = false;
-		}
-		mutex_unlock(&ws_stats_mtx);
-		break;
-	default:
-		break;
-	}
-	return 0;
-}
-
-static struct notifier_block waker_pm_nb = {
-	.notifier_call = waker_pm_notify,
-};
-
-static int screenoff_ws_show(struct seq_file *m, void *v)
-{
-	int i;
-
-	mutex_lock(&ws_stats_mtx);
-	if (ws_diff_count == 0) {
-		seq_puts(m, "no screen-off wakeup data yet\n");
-		goto out;
-	}
-	seq_printf(m, "screen-off wakeup-source stats (top %d):\n", ws_diff_count);
-	for (i = 0; i < ws_diff_count; i++)
-		seq_printf(m, "%2d. %-24s events=%lu\n",
-			   i + 1, ws_diff[i].name, ws_diff[i].delta);
-out:
-	mutex_unlock(&ws_stats_mtx);
-	return 0;
-}
-
-static int screenoff_ws_open(struct inode *inode, struct file *filp)
-{
-	return single_open(filp, screenoff_ws_show, inode);
-}
-
-static const struct proc_ops screenoff_ws_proc_ops = {
-	.proc_open	= screenoff_ws_open,
-	.proc_read	= seq_read,
-	.proc_lseek	= default_llseek,
-	.proc_release	= single_release,
-};
-
 static int __init waker_identify_init(void)
 {
 	waker_identify_dir = proc_mkdir("waker_identify", NULL);
@@ -1046,18 +855,11 @@ static int __init waker_identify_init(void)
 	proc_create_data("rt_info", 0664, waker_identify_dir, &rt_info_proc_ops, NULL);
 	proc_create_data("enable", 0664, waker_identify_dir, &enable_proc_ops, NULL);
 	proc_create_data("debug_enable", 0664, waker_identify_dir, &debug_enable_proc_ops, NULL);
-
-	/* Screen-off wakeup-source accounting. */
-	proc_create_data("screenoff_ws_stats", 0444, waker_identify_dir,
-			 &screenoff_ws_proc_ops, NULL);
-	register_pm_notifier(&waker_pm_nb);
-
 	return 0;
 }
 
 static void __exit waker_identify_exit(void)
 {
-	unregister_pm_notifier(&waker_pm_nb);
 }
 
 module_init(waker_identify_init);

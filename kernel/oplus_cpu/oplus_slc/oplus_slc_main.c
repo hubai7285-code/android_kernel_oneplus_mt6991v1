@@ -687,35 +687,10 @@ static int oplus_slc_pm_notify(struct notifier_block *nb, unsigned long mode, vo
 	case PM_RESTORE_PREPARE:
 	case PM_SUSPEND_PREPARE:
 		oplus_slc_indicator_suspend(true);
-		/*
-		 * Release GPU's SLC ceiling on suspend so that the GPU's
-		 * reserved SLC ways can be reclaimed by CPU/APU traffic.
-		 * This lowers DDR wakeup pressure and helps the SoC reach
-		 * deeper idle states while the screen is off.
-		 */
-		if (c_config[ID_GPU - 1] > 0) {
-			int ret = slbc_ceil(ID_GPU, 0);
-			if (ret)
-				pr_err("suspend: release GPU SLC ceiling failed: %d\n", ret);
-			else
-				pr_info("suspend: released GPU SLC ceiling\n");
-		}
 		break;
 	case PM_POST_HIBERNATION:
 	case PM_POST_RESTORE:
 	case PM_POST_SUSPEND:
-		/*
-		 * Restore the GPU ceiling that was active before suspend, if
-		 * any. c_config holds the last user-configured value.
-		 */
-		if (c_config[ID_GPU - 1] > 0) {
-			int ret = slbc_ceil(ID_GPU, c_config[ID_GPU - 1]);
-			if (ret)
-				pr_err("resume: restore GPU SLC ceiling failed: %d\n", ret);
-			else
-				pr_info("resume: restored GPU SLC ceiling to %u\n",
-					c_config[ID_GPU - 1]);
-		}
 		oplus_slc_indicator_suspend(false);
 		break;
 	default:
