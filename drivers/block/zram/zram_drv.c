@@ -15,7 +15,7 @@
 #define KMSG_COMPONENT "ExtM"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-#if defined(CONFIG_ZRAM_WRITEBACK)
+#if defined(CONFIG_ZRAM_ANON_WRITEBACK)
 enum anon_writeback_flags {
 	ANON_WRITEBACK_NORMAL= 0,
 	ANON_WRITEBACK_PROTECTED,
@@ -2580,7 +2580,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	struct zcomp_strm *zstrm;
 	unsigned long element = 0;
 	enum zram_pageflags flags = 0;
-#if defined(CONFIG_ZRAM_WRITEBACK)
+#if defined(CONFIG_ZRAM_ANON_WRITEBACK)
 	struct mem_cgroup *memcg = page_memcg(page);
 	unsigned long long android_oem_data1;
 #endif
@@ -2697,7 +2697,7 @@ out:
 		}
 	}
 
-#if defined(CONFIG_ZRAM_WRITEBACK)
+#if defined(CONFIG_ZRAM_ANON_WRITEBACK)
 	if (memcg != NULL) {
 		/**
 		 * In Kernel 5.10 include/linux/memcontrol.h
@@ -3677,7 +3677,7 @@ static void destroy_devices(void)
 	cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
 }
 
-#if defined(CONFIG_ZRAM_WRITEBACK)
+#if defined(CONFIG_ZRAM_ANON_WRITEBACK)
 static u64
 get_mem_cgroup_anno_writeback(struct cgroup_subsys_state *css,
 			      struct cftype *cft)
@@ -3752,7 +3752,7 @@ static int __init zram_init(void)
 	zram_kshrink_slabd_init();
 #endif
 
-#if defined(CONFIG_ZRAM_WRITEBACK)
+#if defined(CONFIG_ZRAM_ANON_WRITEBACK)
 	WARN_ON(cgroup_add_legacy_cftypes(&memory_cgrp_subsys, mi_memcg_control));
 #endif
 

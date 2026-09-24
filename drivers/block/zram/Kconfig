@@ -115,6 +115,22 @@ config ZRAM_UNLIMITED_WRITEBACK
 	  zram-internal optimization and does NOT depend on any vendor
 	  memory-freeze cgroup.
 
+config ZRAM_ANON_WRITEBACK
+	bool "ZRAM: vendor per-memcg anon writeback control (needs vendor mem_cgroup)"
+	depends on ZRAM
+	depends on ZRAM_WRITEBACK
+	help
+	  Vendor (oplus/mediatek) integration item: registers the legacy
+	  memory-cgroup file "anno_writeback_control" and honours the
+	  vendor-only field struct mem_cgroup::android_oem_data1 to tag
+	  pages as writeback-protected / writeback-unlimited.
+
+	  android_oem_data1 does NOT exist in a clean GKI/AOSP
+	  struct mem_cgroup, therefore this option defaults to n. Enabling
+	  it on a kernel whose struct mem_cgroup lacks android_oem_data1
+	  will fail to compile. Keep it off unless you know your tree has
+	  the vendor memcg patch.
+
 config ZRAM_KCOMPRESSD_OPT
 	bool "use Kcompressd thread to Boost ZRAM Performance"
 	depends on ZRAM
