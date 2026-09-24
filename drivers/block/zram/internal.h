@@ -31,55 +31,10 @@ static void zram_bio_add_page(struct bio *bio, struct page *page,
 #define zram_bio_add_page __bio_add_page
 #endif
 
-/**
- * A simpler version of bvec_iter_advance(), @bytes should not span
- * across multiple bvec entries, i.e. bytes <= bv[i->bi_idx].bv_len
+/*
+ * NOTE (6.6 port): bvec_iter_advance_single(), bio_advance_iter_single(),
+ * memcpy_from_bvec() and memcpy_to_bvec() are already provided by
+ * include/linux/bvec.h and include/linux/bio.h on 6.6, so keeping local
+ * copies here triggers "redefinition" errors.  Only the bio_add_page
+ * wrapper above is still needed for the module build.
  */
-static inline void bvec_iter_advance_single(const struct bio_vec *bv,
-	struct bvec_iter *iter, unsigned int bytes)
-{
-	unsigned int done = iter->bi_bvec_done + bytes;
-
-	if (done == bv[iter->bi_idx].bv_len) {
-		done = 0;
-		iter->bi_idx++;
-	}
-
-	iter->bi_bvec_done = done;
-	iter->bi_size -= bytes;
-}
-
-/* @bytes should be less or equal to bvec[i->bi_idx].bv_len */
-static inline void bio_advance_iter_single(const struct bio *bio,
-	struct bvec_iter *iter, unsigned int bytes)
-{
-	iter->bi_sector += bytes >> 9;
-
-	if (bio_no_advance_iter(bio))
-		iter->bi_size -= bytes;
-	else
-		bvec_iter_advance_single(bio->bi_io_vec,
-			iter, bytes);
-}
-
-/**
- * memcpy_from_bvec - copy data from a bvec
- * @bvec: bvec to copy from
- *
- * Must be called on single-page bvecs only.
- */
-static inline void memcpy_from_bvec(char *to, struct bio_vec *bvec)
-{
-	memcpy_from_page(to, bvec->bv_page, bvec->bv_offset, bvec->bv_len);
-}
-
-/**
- * memcpy_to_bvec - copy data to a bvec
- * @bvec: bvec to copy to
- *
- * Must be called on single-page bvecs only.
- */
-static inline void memcpy_to_bvec(struct bio_vec *bvec, const char *from)
-{
-	memcpy_to_page(bvec->bv_page, bvec->bv_offset, from, bvec->bv_len);
-}
