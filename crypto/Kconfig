@@ -1290,6 +1290,8 @@ config CRYPTO_ZSTD
 
 	  See https://github.com/facebook/zstd for further information.
 
+source "crypto/abk_zstdp/Kconfig"
+
 endmenu
 
 menu "Random number generation"

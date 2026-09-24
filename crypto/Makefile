@@ -267,3 +267,4 @@ hostprogs-always-y := fips140_gen_hmac
 HOSTLDLIBS_fips140_gen_hmac := -lcrypto -lelf
 
 endif
+obj-$(CONFIG_CRYPTO_ZSTDP) += abk_zstdp/
