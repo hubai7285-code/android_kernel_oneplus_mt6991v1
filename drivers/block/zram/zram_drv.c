@@ -740,7 +740,7 @@ static void reset_bdev(struct zram *zram)
 	 * Conflict Fix Kernel API with blkdev_put
 	 */
 	/* blkdev_put(bdev, zram); */
-	blkdev_put(bdev, FMODE_READ|FMODE_WRITE|FMODE_EXCL);
+	blkdev_put(bdev, zram);
 
 	/* hope filp_close flush all of IO */
 	filp_close(zram->backing_dev, NULL);
@@ -840,7 +840,7 @@ static ssize_t backing_dev_store(struct device *dev,
 	/* bdev = blkdev_get_by_dev(inode->i_rdev, BLK_OPEN_READ | BLK_OPEN_WRITE,
 				 zram, NULL); */
 	bdev = blkdev_get_by_dev(inode->i_rdev,
-			FMODE_READ | FMODE_WRITE | FMODE_EXCL, zram);
+			BLK_OPEN_READ | BLK_OPEN_WRITE, zram, NULL);
 
 	if (IS_ERR(bdev)) {
 		err = PTR_ERR(bdev);
@@ -876,7 +876,7 @@ out:
 		 * Conflict Fix Kernel API with blkdev_put
 		 */
 		/* blkdev_put(bdev, zram); */
-		blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
+		blkdev_put(bdev, zram);
 
 	if (backing_dev)
 		filp_close(backing_dev, NULL);
@@ -948,7 +948,7 @@ static void read_from_bdev_async(struct zram *zram, struct page *page,
 	 * reference: fd45af53e ("zram: pass a page to read_from_bdev [android15-6.6]")
 	 * reference: 0cd97a037 ("zram: don't return errors from read_from_bdev_async")
 	 */
-	bio = bio_alloc(GFP_NOIO, 1);
+	bio = bio_alloc(zram->bdev, 1, parent->bi_opf, GFP_NOIO);
 
 	bio_set_dev(bio, zram->bdev);
 	bio->bi_iter.bi_sector = entry * (PAGE_SIZE >> 9);
@@ -1033,7 +1033,8 @@ static int wait_for_writeback_batch(struct zram *zram, int start_blkidx, int nr_
 	 * Restore the 5.10.237 the wait_for_writeback_batch
 	 * reference: 49add4966 ("block: pass a block_device and opf to bio_init")
 	 */
-	bio_init(&bio, bio_vecs, nr_write);
+	bio_init(&bio, zram->bdev, bio_vecs, nr_write,
+		 REQ_OP_WRITE | REQ_SYNC);
 	bio_set_dev(&bio, zram->bdev);
 	bio.bi_iter.bi_sector = start_blkidx * (PAGE_SIZE >> 9);
 	bio.bi_opf = REQ_OP_WRITE | REQ_SYNC;
@@ -1442,7 +1443,7 @@ static void zram_sync_read(struct work_struct *work)
 	 * Restore the 5.10.237 the zram_sync_read
 	 * reference: 49add4966 ("block: pass a block_device and opf to bio_init")
 	 */
-	bio_init(&bio, &bv, 1);
+	bio_init(&bio, zw->zram->bdev, &bv, 1, REQ_OP_READ);
 	bio_set_dev(&bio, zw->zram->bdev);
 	bio.bi_iter.bi_sector = zw->entry * (PAGE_SIZE >> 9);
 	bio.bi_opf = REQ_OP_READ;
@@ -3129,9 +3130,9 @@ static void zram_bio_write(struct zram *zram, struct bio *bio)
 /*
  * Handler function for all zram I/O requests.
  */
-static blk_qc_t zram_submit_bio(struct bio *bio)
+static void zram_submit_bio(struct bio *bio)
 {
-	struct zram *zram = bio->bi_disk->private_data;
+	struct zram *zram = bio->bi_bdev->bd_disk->private_data;
 
 	switch (bio_op(bio)) {
 	case REQ_OP_READ:
@@ -3153,7 +3154,6 @@ static blk_qc_t zram_submit_bio(struct bio *bio)
 		WARN_ON_ONCE(1);
 		bio_endio(bio);
 	}
-	return BLK_QC_T_NONE;
 }
 
 static void zram_slot_free_notify(struct block_device *bdev,
@@ -3199,8 +3199,8 @@ static void zram_reset_device(struct zram *zram)
 		return;
 	}
 
-	set_capacity(zram->disk, 0);
-	part_stat_set_all(&zram->disk->part0, 0);
+	set_capacity_and_notify(zram->disk, 0);
+	part_stat_set_all(zram->disk->part0, 0);
 
 #ifdef CONFIG_ZRAM_OPT_STATS
 	free_pages_life(zram->pages_life);
@@ -3262,9 +3262,7 @@ static ssize_t disksize_store(struct device *dev,
 	zram->first_time = zram->last_time = 0;
 #endif
 	zram->disksize = disksize;
-	set_capacity(zram->disk, zram->disksize >> SECTOR_SHIFT);
-
-	revalidate_disk_size(zram->disk, true);
+	set_capacity_and_notify(zram->disk, zram->disksize >> SECTOR_SHIFT);
 	up_write(&zram->init_lock);
 
 	return len;
@@ -3283,8 +3281,6 @@ static ssize_t reset_store(struct device *dev,
 	int ret;
 	unsigned short do_reset;
 	struct zram *zram;
-	struct block_device *bdev;
-
 	ret = kstrtou16(buf, 10, &do_reset);
 	if (ret)
 		return ret;
@@ -3293,43 +3289,36 @@ static ssize_t reset_store(struct device *dev,
 		return -EINVAL;
 
 	zram = dev_to_zram(dev);
-	bdev = bdget_disk(zram->disk, 0);
-	if (!bdev)
-		return -ENOMEM;
-
-	mutex_lock(&bdev->bd_mutex);
+	mutex_lock(&zram->disk->open_mutex);
 	/* Do not reset an active device or claimed device */
-	if (bdev->bd_openers || zram->claim) {
-		mutex_unlock(&bdev->bd_mutex);
-		bdput(bdev);
+	if (disk_openers(zram->disk) || zram->claim) {
+		mutex_unlock(&zram->disk->open_mutex);
 		return -EBUSY;
 	}
 
 	/* From now on, anyone can't open /dev/zram[0-9] */
 	zram->claim = true;
-	mutex_unlock(&bdev->bd_mutex);
+	mutex_unlock(&zram->disk->open_mutex);
 
 	/* Make sure all the pending I/O are finished */
-	sync_blockdev(bdev);
+	sync_blockdev(zram->disk->part0);
 	zram_reset_device(zram);
-	revalidate_disk_size(zram->disk, true);
-	bdput(bdev);
 
-	mutex_lock(&bdev->bd_mutex);
+	mutex_lock(&zram->disk->open_mutex);
 	zram->claim = false;
-	mutex_unlock(&bdev->bd_mutex);
+	mutex_unlock(&zram->disk->open_mutex);
 
 	return len;
 }
 
-static int zram_open(struct block_device *bdev, fmode_t mode)
+static int zram_open(struct gendisk *disk, blk_mode_t mode)
 {
 	int ret = 0;
 	struct zram *zram;
 
-	WARN_ON(!mutex_is_locked(&bdev->bd_mutex));
+	WARN_ON(!mutex_is_locked(&disk->open_mutex));
 
-	zram = bdev->bd_disk->private_data;
+	zram = disk->private_data;
 	/* zram was claimed to reset so open request fails */
 	if (zram->claim)
 		ret = -EBUSY;
@@ -3423,7 +3412,6 @@ ATTRIBUTE_GROUPS(zram_disk);
 static int zram_add(void)
 {
 	struct zram *zram;
-	struct request_queue *queue;
 	int ret, device_id;
 #ifdef CONFIG_ZRAM_WRITEBACK
 	int count_index = 0;
@@ -3452,31 +3440,23 @@ static int zram_add(void)
 		atomic64_set(&zram->stats.total_idle_count[count_index], 0);
     }
 #endif
-	queue = blk_alloc_queue(NUMA_NO_NODE);
-	if (!queue) {
-		pr_err("Error allocating disk queue for device %d\n",
-			device_id);
-		ret = -ENOMEM;
-		goto out_free_idr;
-	}
-
 #if defined(CONFIG_ZRAM_WRITEBACK) && defined(CONFIG_ZRAM_UNLIMITED_WRITEBACK)
 	zram->mfz_disk_quota = 0;
 	zram->mfz_enable = 1;
 #endif
 	/* gendisk structure */
-	zram->disk = alloc_disk(1);
+	zram->disk = blk_alloc_disk(NUMA_NO_NODE);
 	if (!zram->disk) {
 		pr_err("Error allocating disk structure for device %d\n",
 			device_id);
 		ret = -ENOMEM;
-		goto out_free_queue;
+		goto out_free_idr;
 	}
-
 	zram->disk->major = zram_major;
 	zram->disk->first_minor = device_id;
+	zram->disk->minors = 1;
+	zram->disk->flags |= GENHD_FL_NO_PART;
 	zram->disk->fops = &zram_devops;
-	zram->disk->queue = queue;
 	zram->disk->private_data = zram;
 	snprintf(zram->disk->disk_name, 16, "zram%d", device_id);
 
@@ -3497,7 +3477,6 @@ static int zram_add(void)
 	blk_queue_io_opt(zram->disk->queue, PAGE_SIZE);
 	zram->disk->queue->limits.discard_granularity = PAGE_SIZE;
 	blk_queue_max_discard_sectors(zram->disk->queue, UINT_MAX);
-	blk_queue_flag_set(QUEUE_FLAG_DISCARD, zram->disk->queue);
 
 	/*
 	 * zram_bio_discard() will clear all logical blocks if logical block
@@ -3511,7 +3490,9 @@ static int zram_add(void)
 		blk_queue_max_write_zeroes_sectors(zram->disk->queue, UINT_MAX);
 
 	blk_queue_flag_set(QUEUE_FLAG_STABLE_WRITES, zram->disk->queue);
-	device_add_disk(NULL, zram->disk, zram_disk_groups);
+	ret = device_add_disk(NULL, zram->disk, zram_disk_groups);
+	if (ret)
+		goto out_cleanup_disk;
 
 	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
 
@@ -3519,8 +3500,8 @@ static int zram_add(void)
 	pr_info("Added device: %s\n", zram->disk->disk_name);
 	return device_id;
 
-out_free_queue:
-	blk_cleanup_queue(queue);
+out_cleanup_disk:
+	put_disk(zram->disk);
 out_free_idr:
 	idr_remove(&zram_index_idr, device_id);
 out_free_dev:
@@ -3530,27 +3511,20 @@ out_free_dev:
 
 static int zram_remove(struct zram *zram)
 {
-	struct block_device *bdev;
 	bool claimed;
 #ifdef CONFIG_ZRAM_WRITEBACK
 	int i;
 #endif
 
-	bdev = bdget_disk(zram->disk, 0);
-	if (!bdev)
-		return -ENOMEM;
-
-	mutex_lock(&bdev->bd_mutex);
-	if (bdev->bd_openers) {
-		mutex_unlock(&bdev->bd_mutex);
-		bdput(bdev);
+	mutex_lock(&zram->disk->open_mutex);
+	if (disk_openers(zram->disk)) {
+		mutex_unlock(&zram->disk->open_mutex);
 		return -EBUSY;
 	}
-
 	claimed = zram->claim;
 	if (!claimed)
 		zram->claim = true;
-	mutex_unlock(&bdev->bd_mutex);
+	mutex_unlock(&zram->disk->open_mutex);
 
 	zram_debugfs_unregister(zram);
 
@@ -3562,10 +3536,9 @@ static int zram_remove(struct zram *zram)
 		;
 	} else {
 		/* Make sure all the pending I/O are finished */
-		sync_blockdev(bdev);
+		sync_blockdev(zram->disk->part0);
 		zram_reset_device(zram);
 	}
-	bdput(bdev);
 
 #ifdef CONFIG_ZRAM_WRITEBACK
 	if (zram->writeback_pages)
@@ -3576,7 +3549,6 @@ static int zram_remove(struct zram *zram)
 	pr_info("Removed device: %s\n", zram->disk->disk_name);
 
 	del_gendisk(zram->disk);
-	blk_cleanup_queue(zram->disk->queue);
 
 	/* del_gendisk drains pending reset_store */
 	WARN_ON_ONCE(claimed && zram->claim);
@@ -3601,8 +3573,8 @@ static int zram_remove(struct zram *zram)
  * creates a new un-initialized zram device and returns back this device's
  * device_id (or an error code if it fails to create a new device).
  */
-static ssize_t hot_add_show(struct class *class,
-			struct class_attribute *attr,
+static ssize_t hot_add_show(const struct class *class,
+			const struct class_attribute *attr,
 			char *buf)
 {
 	int ret;
@@ -3618,8 +3590,8 @@ static ssize_t hot_add_show(struct class *class,
 static struct class_attribute class_attr_hot_add =
 	__ATTR(hot_add, 0400, hot_add_show, NULL);
 
-static ssize_t hot_remove_store(struct class *class,
-			struct class_attribute *attr,
+static ssize_t hot_remove_store(const struct class *class,
+			const struct class_attribute *attr,
 			const char *buf,
 			size_t count)
 {
