@@ -69,18 +69,9 @@ config ZRAM_WRITEBACK
 
 	 See Documentation/admin-guide/blockdev/zram.rst for more information.
 
-config ZRAM_TRACK_ENTRY_ACTIME
-	bool "Track access time of zram entries"
-	depends on ZRAM
-	help
-	  With this feature zram tracks access time of every stored
-	  entry (page), which can be used for a more fine grained IDLE
-	  pages writeback.
-
 config ZRAM_MEMORY_TRACKING
 	bool "Track zRam block status"
 	depends on ZRAM && DEBUG_FS
-	select ZRAM_TRACK_ENTRY_ACTIME
 	help
 	  With this feature, admin can track the state of allocated blocks
 	  of zRAM. Admin could see the information via
@@ -95,4 +86,41 @@ config ZRAM_MULTI_COMP
 	  This will enable multi-compression streams, so that ZRAM can
 	  re-compress pages using a potentially slower but more effective
 	  compression algorithm. Note, that IDLE page recompression
-	  requires ZRAM_TRACK_ENTRY_ACTIME.
+	  requires ZRAM_MEMORY_TRACKING.
+
+config ZRAM_OPT_STATS
+	bool "ZRAM optimization: extended per-device statistics"
+	depends on ZRAM
+	help
+	  Portable optimization item (refactored from the MIUI zram stats
+	  feature). Tracks extra per-zram-device statistics such as
+	  lifetime/access-time of stored pages and idle-writeback counts.
+	  No vendor/cgroup infrastructure required. Exposed via
+	  /sys/block/zramX/.
+
+config ZRAM_UNLIMITED_WRITEBACK
+	bool "ZRAM optimization: unlimited writeback quota mode"
+	depends on ZRAM
+	depends on ZRAM_WRITEBACK
+	help
+	  Portable optimization item (refactored from the MIUI MemoryFreeze
+	  writeback feature). Allows selected pages to bypass the normal
+	  writeback size limit via a sysfs quota tunable, improving memory
+	  reclaim headroom under high memory pressure. This is a generic
+	  zram-internal optimization and does NOT depend on any vendor
+	  memory-freeze cgroup.
+
+config ZRAM_KCOMPRESSD_OPT
+	bool "use Kcompressd thread to Boost ZRAM Performance"
+	depends on ZRAM
+	help
+	  use a separate kernel thread ("Kcompressd") to assist with
+	  zram_bio request, there improve ZRAM compress performance
+
+config ZRAM_KSHRINK_SLABD
+	bool "use kshrink_slabd thread Offload the load kswapd0"
+	depends on ZRAM
+	help
+	  Used to convert synchronous, blocking garbage collection
+	  to async garbage collection in a background kernel thread,
+	  thereby reducing system latency on under high memory load.
