@@ -1159,7 +1159,10 @@ static int f2fs_fixed_input_decompress_cluster(struct decompress_io_ctx *dic,
 		ret = -EFSCORRUPTED;
 
 		/* Avoid f2fs_commit_super in irq context */
-		f2fs_handle_error(sbi, ERROR_FAIL_DECOMPRESSION);
+		if (!in_task)
+			f2fs_handle_error_async(sbi, ERROR_FAIL_DECOMPRESSION);
+		else
+			f2fs_handle_error(sbi, ERROR_FAIL_DECOMPRESSION);
 		goto out_release;
 	}
 
@@ -1845,26 +1848,18 @@ int f2fs_truncate_partial_cluster(struct inode *inode, u64 from, bool lock)
 			struct folio *folio = page_folio(rpages[i]);
 			loff_t start = (loff_t)folio->index << PAGE_SHIFT;
 
-			folio_zero_segment(folio, offset, folio_size(folio));
-
-			if (from >= start)
+			if (from <= start) {
+				folio_zero_segment(folio, 0, folio_size(folio));
+			} else {
+				folio_zero_segment(folio, from - start,
+						folio_size(folio));
 				break;
+			}
 		}
 
 		f2fs_compress_write_end(inode, fsdata, start_idx, true);
-
-		err = filemap_write_and_wait_range(inode->i_mapping,
-				round_down(from, cluster_size << PAGE_SHIFT),
-				LLONG_MAX);
-		if (err)
-			return err;
-
-		truncate_pagecache(inode, from);
-
-		err = f2fs_do_truncate_blocks(inode,
-				round_up(from, PAGE_SIZE), lock);
 	}
-	return err;
+	return 0;
 }
 
 static int f2fs_write_compressed_pages(struct compress_ctx *cc,
@@ -2107,10 +2102,10 @@ void f2fs_compress_write_end_io(struct bio *bio, struct page *page)
 
 	f2fs_compress_free_page(page);
 
-	if (atomic_dec_return(&cic->pending_pages)) {
-		dec_page_count(sbi, type);
+	dec_page_count(sbi, type);
+
+	if (atomic_dec_return(&cic->pending_pages))
 		return;
-	}
 
 	for (i = 0; i < cic->nr_rpages; i++) {
 		WARN_ON(!cic->rpages[i]);
@@ -2120,14 +2115,6 @@ void f2fs_compress_write_end_io(struct bio *bio, struct page *page)
 
 	page_array_free(sbi, cic->rpages, cic->nr_rpages);
 	kmem_cache_free(cic_entry_slab, cic);
-
-	/*
-	 * Make sure dec_page_count() is the last access to sbi.
-	 * Once it drops the F2FS_WB_CP_DATA counter to zero, the
-	 * unmount thread can proceed to destroy sbi and
-	 * sbi->page_array_slab.
-	 */
-	dec_page_count(sbi, type);
 }
 
 static int f2fs_write_raw_pages(struct compress_ctx *cc,
@@ -2499,8 +2486,6 @@ static void f2fs_free_dic(struct decompress_io_ctx *dic,
 		bool bypass_destroy_callback)
 {
 	int i;
-	/* use sbi in dic to avoid UFA of dic->inode*/
-	struct f2fs_sb_info *sbi = dic->sbi;
 
 	if (f2fs_compress_layout(dic->inode) == COMPRESS_FIXED_INPUT)
 		f2fs_release_decomp_mem(dic, bypass_destroy_callback, true);

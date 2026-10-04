@@ -28,8 +28,6 @@
 #include "iostat.h"
 #include <trace/events/f2fs.h>
 #include <trace/hooks/blk.h>
-#undef CREATE_TRACE_POINTS
-#include <trace/hooks/fs.h>
 
 #define NUM_PREALLOC_POST_READ_CTXS	128
 
@@ -447,22 +445,16 @@ static void f2fs_write_end_io(struct bio *bio)
 
 		f2fs_bug_on(sbi, page->mapping == NODE_MAPPING(sbi) &&
 				page_folio(page)->index != nid_of_node(page));
-		if (f2fs_in_warm_node_list(sbi, page))
-			f2fs_del_fsync_node_entry(sbi, page);
 
 		dec_page_count(sbi, type);
-
-		/*
-		 * we should access sbi before end_page_writeback() to
-		 * avoid racing w/ kill_f2fs_super()
-		 */
-		if (type == F2FS_WB_CP_DATA && !get_pages(sbi, type) &&
-				wq_has_sleeper(&sbi->cp_wait))
-			wake_up(&sbi->cp_wait);
-
+		if (f2fs_in_warm_node_list(sbi, page))
+			f2fs_del_fsync_node_entry(sbi, page);
 		clear_page_private_gcing(page);
 		end_page_writeback(page);
 	}
+	if (!get_pages(sbi, F2FS_WB_CP_DATA) &&
+				wq_has_sleeper(&sbi->cp_wait))
+		wake_up(&sbi->cp_wait);
 
 	bio_put(bio);
 }
@@ -617,7 +609,6 @@ void f2fs_submit_read_bio(struct f2fs_sb_info *sbi, struct bio *bio,
 	trace_f2fs_submit_read_bio(sbi->sb, type, bio);
 
 	iostat_update_submit_ctx(bio, type);
-	trace_android_vh_f2fs_iostat_submit(sbi->sb, type, bio);
 	submit_bio(bio);
 }
 
@@ -627,7 +618,6 @@ static void f2fs_submit_write_bio(struct f2fs_sb_info *sbi, struct bio *bio,
 	WARN_ON_ONCE(is_read_io(bio_op(bio)));
 	trace_f2fs_submit_write_bio(sbi->sb, type, bio);
 	iostat_update_submit_ctx(bio, type);
-	trace_android_vh_f2fs_iostat_submit(sbi->sb, type, bio);
 	submit_bio(bio);
 }
 
@@ -1123,7 +1113,6 @@ alloc_new:
 	io->last_block_in_bio = fio->new_blkaddr;
 
 	trace_f2fs_submit_folio_write(page_folio(fio->page), fio);
-	trace_android_vh_f2fs_set_bio_flag(page_folio(fio->page), io->bio);
 #ifdef CONFIG_BLK_DEV_ZONED
 	if (f2fs_sb_has_blkzoned(sbi) && btype < META &&
 			is_end_zone_blkaddr(sbi, fio->new_blkaddr)) {
@@ -1620,8 +1609,7 @@ static bool f2fs_map_blocks_cached(struct inode *inode,
 		f2fs_wait_on_block_writeback_range(inode,
 					map->m_pblk, map->m_len);
 
-	map->m_multidev_dio = f2fs_allow_multi_device_dio(sbi, flag);
-	if (map->m_multidev_dio) {
+	if (f2fs_allow_multi_device_dio(sbi, flag)) {
 		int bidx = f2fs_target_device_index(sbi, map->m_pblk);
 		struct f2fs_dev_info *dev = &sbi->devs[bidx];
 
@@ -1680,26 +1668,8 @@ int f2fs_map_blocks(struct inode *inode, struct f2fs_map_blocks *map, int flag)
 	if (!maxblocks)
 		return 0;
 
-	if (!map->m_may_create && f2fs_map_blocks_cached(inode, map, flag)) {
-		struct extent_info ei;
-
-		/*
-		 * 1. If map->m_multidev_dio is true, map->m_pblk cannot be
-		 * waitted by f2fs_wait_on_block_writeback_range() and are not
-		 * mergeable.
-		 * 2. If pgofs hits the read extent cache, it means the mapping
-		 * is already cached in the extent cache, but it is not
-		 * mergeable, and there is no need to query the mapping again
-		 * via f2fs_get_dnode_of_data().
-		 */
-		pgofs =	(pgoff_t)map->m_lblk + map->m_len;
-		if (map->m_len == maxblocks ||
-			map->m_multidev_dio ||
-			f2fs_lookup_read_extent_cache(inode, pgofs, &ei))
-			goto out;
-		ofs = map->m_len;
-		goto map_more;
-	}
+	if (!map->m_may_create && f2fs_map_blocks_cached(inode, map, flag))
+		goto out;
 
 	map->m_bdev = inode->i_sb->s_bdev;
 	map->m_multidev_dio =
@@ -1731,8 +1701,7 @@ int f2fs_map_blocks(struct inode *inode, struct f2fs_map_blocks *map, int flag)
 
 	/* it only supports block size == page size */
 	pgofs =	(pgoff_t)map->m_lblk;
-map_more:
-	end = (pgoff_t)map->m_lblk + maxblocks;
+	end = pgofs + maxblocks;
 
 next_dnode:
 	if (map->m_may_create) {
@@ -3596,13 +3565,9 @@ static int __f2fs_write_data_pages(struct address_space *mapping,
 		locked = true;
 	}
 
-	account_writeback(inode, true);
-
 	blk_start_plug(&plug);
 	ret = f2fs_write_cache_pages(mapping, wbc, io_type);
 	blk_finish_plug(&plug);
-
-	account_writeback(inode, false);
 
 	if (locked)
 		mutex_unlock(&sbi->writepages);
@@ -3818,7 +3783,6 @@ static int prepare_atomic_write_begin(struct f2fs_sb_info *sbi,
 	pgoff_t index = folio->index;
 	int err = 0;
 	block_t ori_blk_addr = NULL_ADDR;
-	bool cow_has_reserved_block = false;
 
 	/* If pos is beyond the end of file, reserve a new block in COW inode */
 	if ((pos & PAGE_MASK) >= i_size_read(inode))
@@ -3828,11 +3792,9 @@ static int prepare_atomic_write_begin(struct f2fs_sb_info *sbi,
 	err = __find_data_block(cow_inode, index, blk_addr);
 	if (err) {
 		return err;
-	} else if (__is_valid_data_blkaddr(*blk_addr)) {
+	} else if (*blk_addr != NULL_ADDR) {
 		*use_cow = true;
 		return 0;
-	} else if (*blk_addr == NEW_ADDR) {
-		cow_has_reserved_block = true;
 	}
 
 	if (is_inode_flag_set(inode, FI_ATOMIC_REPLACE))
@@ -3845,13 +3807,10 @@ static int prepare_atomic_write_begin(struct f2fs_sb_info *sbi,
 
 reserve_block:
 	/* Finally, we should reserve a new block in COW inode for the update */
-	if (!cow_has_reserved_block) {
-		err = __reserve_data_block(cow_inode, index, blk_addr,
-					   node_changed);
-		if (err)
-			return err;
-		inc_atomic_write_cnt(inode);
-	}
+	err = __reserve_data_block(cow_inode, index, blk_addr, node_changed);
+	if (err)
+		return err;
+	inc_atomic_write_cnt(inode);
 
 	if (ori_blk_addr != NULL_ADDR)
 		*blk_addr = ori_blk_addr;
@@ -4260,7 +4219,6 @@ static int check_swap_activate(struct swap_info_struct *sis,
 
 	while (cur_lblock < last_lblock && cur_lblock < sis->max) {
 		struct f2fs_map_blocks map;
-		bool last_extent = false;
 retry:
 		cond_resched();
 
@@ -4286,10 +4244,11 @@ retry:
 		pblock = map.m_pblk;
 		nr_pblocks = map.m_len;
 
-		if (!last_extent &&
-			((pblock - SM_I(sbi)->main_blkaddr) % blks_per_sec ||
-			nr_pblocks % blks_per_sec ||
-			!f2fs_valid_pinned_area(sbi, pblock))) {
+		if ((pblock - SM_I(sbi)->main_blkaddr) % blks_per_sec ||
+				nr_pblocks % blks_per_sec ||
+				!f2fs_valid_pinned_area(sbi, pblock)) {
+			bool last_extent = false;
+
 			not_aligned++;
 
 			nr_pblocks = roundup(nr_pblocks, blks_per_sec);
@@ -4310,8 +4269,8 @@ retry:
 				goto out;
 			}
 
-			/* lookup block mapping info after block migration */
-			goto retry;
+			if (!last_extent)
+				goto retry;
 		}
 
 		if (cur_lblock + nr_pblocks >= sis->max)
