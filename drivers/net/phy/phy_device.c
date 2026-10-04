@@ -268,45 +268,6 @@ static struct phy_driver genphy_driver;
 static LIST_HEAD(phy_fixup_list);
 static DEFINE_MUTEX(phy_fixup_lock);
 
-static void phy_link_change(struct phy_device *phydev, bool up)
-{
-	struct net_device *netdev = phydev->attached_dev;
-
-	if (up)
-		netif_carrier_on(netdev);
-	else
-		netif_carrier_off(netdev);
-	phydev->adjust_link(netdev);
-	if (phydev->mii_ts && phydev->mii_ts->link_state)
-		phydev->mii_ts->link_state(phydev->mii_ts, phydev);
-}
-
-/**
- * phy_uses_state_machine - test whether consumer driver uses PAL state machine
- * @phydev: the target PHY device structure
- *
- * Ultimately, this aims to indirectly determine whether the PHY is attached
- * to a consumer which uses the state machine by calling phy_start() and
- * phy_stop().
- *
- * When the PHY driver consumer uses phylib, it must have previously called
- * phy_connect_direct() or one of its derivatives, so that phy_prepare_link()
- * has set up a hook for monitoring state changes.
- *
- * When the PHY driver is used by the MAC driver consumer through phylink (the
- * only other provider of a phy_link_change() method), using the PHY state
- * machine is not optional.
- *
- * Return: true if consumer calls phy_start() and phy_stop(), false otherwise.
- */
-static bool phy_uses_state_machine(struct phy_device *phydev)
-{
-	if (phydev->phy_link_change == phy_link_change)
-		return phydev->attached_dev && phydev->adjust_link;
-
-	return !!phydev->phy_link_change;
-}
-
 static bool mdio_bus_phy_may_suspend(struct phy_device *phydev)
 {
 	struct device_driver *drv = phydev->mdio.dev.driver;
@@ -367,7 +328,7 @@ static __maybe_unused int mdio_bus_phy_suspend(struct device *dev)
 	 * may call phy routines that try to grab the same lock, and that may
 	 * lead to a deadlock.
 	 */
-	if (phy_uses_state_machine(phydev))
+	if (phydev->attached_dev && phydev->adjust_link)
 		phy_stop_machine(phydev);
 
 	if (!mdio_bus_phy_may_suspend(phydev))
@@ -421,7 +382,7 @@ no_resume:
 		}
 	}
 
-	if (phy_uses_state_machine(phydev))
+	if (phydev->attached_dev && phydev->adjust_link)
 		phy_start_machine(phydev);
 
 	return 0;
@@ -1108,6 +1069,19 @@ struct phy_device *phy_find_first(struct mii_bus *bus)
 }
 EXPORT_SYMBOL(phy_find_first);
 
+static void phy_link_change(struct phy_device *phydev, bool up)
+{
+	struct net_device *netdev = phydev->attached_dev;
+
+	if (up)
+		netif_carrier_on(netdev);
+	else
+		netif_carrier_off(netdev);
+	phydev->adjust_link(netdev);
+	if (phydev->mii_ts && phydev->mii_ts->link_state)
+		phydev->mii_ts->link_state(phydev->mii_ts, phydev);
+}
+
 /**
  * phy_prepare_link - prepares the PHY layer to monitor link status
  * @phydev: target phy_device struct
@@ -1432,9 +1406,6 @@ int phy_sfp_probe(struct phy_device *phydev,
 
 		ret = sfp_bus_add_upstream(bus, phydev, ops);
 		sfp_bus_put(bus);
-
-		if (ret)
-			phydev->sfp_bus = NULL;
 	}
 	return ret;
 }
@@ -1585,6 +1556,8 @@ int phy_attach_direct(struct net_device *dev, struct phy_device *phydev,
 		goto error;
 
 	phy_resume(phydev);
+	if (!phydev->is_on_sfp_module)
+		phy_led_triggers_register(phydev);
 
 	/**
 	 * If the external phy used by current mac interface is managed by
@@ -1853,9 +1826,10 @@ void phy_detach(struct phy_device *phydev)
 		phydev->attached_dev->phydev = NULL;
 		phydev->attached_dev = NULL;
 	}
-
-	phydev->phy_link_change = NULL;
 	phydev->phylink = NULL;
+
+	if (!phydev->is_on_sfp_module)
+		phy_led_triggers_unregister(phydev);
 
 	if (phydev->mdio.dev.driver)
 		module_put(phydev->mdio.dev.driver->owner);
@@ -3400,31 +3374,17 @@ static int phy_probe(struct device *dev)
 	/* Set the state to READY by default */
 	phydev->state = PHY_READY;
 
-	/* Register the PHY LED triggers */
-	if (!phydev->is_on_sfp_module)
-		phy_led_triggers_register(phydev);
-
 	/* Get the LEDs from the device tree, and instantiate standard
 	 * LEDs for them.
 	 */
 	if (IS_ENABLED(CONFIG_PHYLIB_LEDS) && !phy_driver_is_genphy(phydev) &&
 	    !phy_driver_is_genphy_10g(phydev))
 		err = of_phy_leds(phydev);
-		if (err)
-			goto out;
-	}
-
-	return 0;
 
 out:
-	sfp_bus_del_upstream(phydev->sfp_bus);
-	phydev->sfp_bus = NULL;
-
-	if (!phydev->is_on_sfp_module)
-		phy_led_triggers_unregister(phydev);
-
 	/* Re-assert the reset signal on error */
-	phy_device_reset(phydev, 1);
+	if (err)
+		phy_device_reset(phydev, 1);
 
 	return err;
 }
@@ -3438,9 +3398,6 @@ static int phy_remove(struct device *dev)
 	if (IS_ENABLED(CONFIG_PHYLIB_LEDS) && !phy_driver_is_genphy(phydev) &&
 	    !phy_driver_is_genphy_10g(phydev))
 		phy_leds_unregister(phydev);
-
-	if (!phydev->is_on_sfp_module)
-		phy_led_triggers_unregister(phydev);
 
 	phydev->state = PHY_DOWN;
 
