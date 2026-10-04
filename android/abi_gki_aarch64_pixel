@@ -597,6 +597,7 @@
   disable_irq_nosync
   disable_percpu_irq
   dma_alloc_attrs
+  dma_alloc_noncontiguous
   dma_alloc_pages
   dma_async_device_register
   dma_async_device_unregister
@@ -648,6 +649,7 @@
   dma_fence_unwrap_next
   dma_fence_wait_timeout
   dma_free_attrs
+  dma_free_noncontiguous
   dma_free_pages
   dma_get_sgtable_attrs
   dma_get_slave_caps
@@ -685,6 +687,8 @@
   dma_unmap_page_attrs
   dma_unmap_resource
   dma_unmap_sg_attrs
+  dma_vmap_noncontiguous
+  dma_vunmap_noncontiguous
   do_SAK
   do_send_sig_info
   do_trace_netlink_extack
@@ -863,6 +867,7 @@
   drm_gem_fb_create_handle
   drm_gem_fb_destroy
   drm_gem_handle_create
+  drm_gem_map_dma_buf
   drm_gem_mmap
   drm_gem_object_free
   drm_gem_object_init
@@ -2718,6 +2723,7 @@
   __traceiter_android_rvh_post_init_entity_util_avg
   __traceiter_android_rvh_preempt_disable
   __traceiter_android_rvh_preempt_enable
+  __traceiter_android_rvh_read_swap_cache_async_timeout
   __traceiter_android_rvh_reclaim_folio_list
   __traceiter_android_rvh_remove_entity_load_avg
   __traceiter_android_rvh_rtmutex_prepare_setprio
@@ -2873,6 +2879,7 @@
   __tracepoint_android_rvh_post_init_entity_util_avg
   __tracepoint_android_rvh_preempt_disable
   __tracepoint_android_rvh_preempt_enable
+  __tracepoint_android_rvh_read_swap_cache_async_timeout
   __tracepoint_android_rvh_reclaim_folio_list
   __tracepoint_android_rvh_remove_entity_load_avg
   __tracepoint_android_rvh_rtmutex_prepare_setprio

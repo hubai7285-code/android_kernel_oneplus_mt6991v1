@@ -165,6 +165,7 @@ static void update_free_pages(struct hyp_pool *pool, u64 free_pages)
 static void __hyp_put_page(struct hyp_pool *pool, struct hyp_page *p)
 {
 	u64 free_pages;
+	u16 seen_refcount, old_refcount;
 
 	if (hyp_page_ref_dec_and_test(p)) {
 		hyp_spin_lock(&pool->lock);

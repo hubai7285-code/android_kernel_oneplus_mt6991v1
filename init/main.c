@@ -1003,6 +1003,9 @@ void start_kernel(void)
 	boot_cpu_init();
 	page_address_init();
 	pr_notice("%s", linux_banner);
+#ifdef CONFIG_GKI_DYNAMIC_TASK_STRUCT_SIZE
+	setup_arch_task_struct_size();
+#endif
 	early_security_init();
 	setup_arch(&command_line);
 	setup_boot_config();

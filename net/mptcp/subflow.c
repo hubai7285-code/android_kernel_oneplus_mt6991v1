@@ -1793,7 +1793,7 @@ static void subflow_state_change(struct sock *sk)
 {
 	struct mptcp_subflow_context *subflow = mptcp_subflow_ctx(sk);
 	struct sock *parent = subflow->conn;
-	struct mptcp_sock *msk;
+	struct mptcp_sock *msk = mptcp_sk(parent);
 
 	__subflow_state_change(sk);
 
@@ -2101,6 +2101,8 @@ void __init mptcp_subflow_init(void)
 #endif
 
 #if IS_ENABLED(CONFIG_MPTCP_IPV6)
+void __init mptcp_subflow_v6_init(void)
+{
 	/* In struct mptcp_subflow_request_sock, we assume the TCP request sock
 	 * structures for v4 and v6 have the same size. It should not changed in
 	 * the future but better to make sure to be warned if it is no longer
@@ -2141,9 +2143,5 @@ void __init mptcp_subflow_init(void)
 	tcpv6_prot_override.psock_update_sk_prot = NULL;
 #endif
 #endif
-
-	mptcp_diag_subflow_init(&subflow_ulp_ops);
-
-	if (tcp_register_ulp(&subflow_ulp_ops) != 0)
-		panic("MPTCP: failed to register subflows to ULP\n");
 }
+#endif

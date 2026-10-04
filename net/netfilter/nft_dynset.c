@@ -30,6 +30,10 @@ static int nft_dynset_expr_setup(const struct nft_dynset *priv,
 				 const struct nft_set_ext *ext)
 {
 	struct nft_set_elem_expr *elem_expr = nft_set_ext_expr(ext);
+	struct nft_ctx ctx = {
+		.net	= read_pnet(&priv->set->net),
+		.family	= priv->set->table->family,
+	};
 	struct nft_expr *expr;
 	int i;
 
@@ -42,6 +46,10 @@ static int nft_dynset_expr_setup(const struct nft_dynset *priv,
 	}
 
 	return 0;
+err_out:
+	nft_set_elem_expr_destroy(&ctx, elem_expr);
+
+	return -1;
 }
 
 static void *nft_dynset_new(struct nft_set *set, const struct nft_expr *expr,
@@ -214,7 +222,7 @@ static int nft_dynset_init(const struct nft_ctx *ctx,
 			return err;
 	}
 
-	err = nft_parse_register_load(tb[NFTA_DYNSET_SREG_KEY], &priv->sreg_key,
+	err = nft_parse_register_load(ctx, tb[NFTA_DYNSET_SREG_KEY], &priv->sreg_key,
 				      set->klen);
 	if (err < 0)
 		return err;
@@ -225,7 +233,7 @@ static int nft_dynset_init(const struct nft_ctx *ctx,
 		if (set->dtype == NFT_DATA_VERDICT)
 			return -EOPNOTSUPP;
 
-		err = nft_parse_register_load(tb[NFTA_DYNSET_SREG_DATA],
+		err = nft_parse_register_load(ctx, tb[NFTA_DYNSET_SREG_DATA],
 					      &priv->sreg_data, set->dlen);
 		if (err < 0)
 			return err;

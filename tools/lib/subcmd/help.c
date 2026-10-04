@@ -102,6 +102,8 @@ void exclude_cmds(struct cmdnames *cmds, struct cmdnames *excludes)
 			cmds->names[cj++] = cmds->names[ci];
 			cmds->names[ci++] = NULL;
 		}
+		ci++;
+		cj++;
 	}
 	for (ci = cj; ci < cmds->cnt; ci++)
 		assert(cmds->names[ci] == NULL);

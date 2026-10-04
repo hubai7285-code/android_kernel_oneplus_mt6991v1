@@ -132,6 +132,12 @@ static int __kvm_arm_smmu_topup_from_cma(size_t size, gfp_t gfp, size_t *allocat
 
 	return 0;
 }
+#else
+static int __kvm_arm_smmu_topup_from_cma(size_t size, gfp_t gfp, size_t *allocated)
+{
+	return -ENOMEM;
+}
+#endif /* CONFIG_CMA */
 
 static int kvm_arm_smmu_topup_memcache(struct arm_smccc_res *res, gfp_t gfp)
 {

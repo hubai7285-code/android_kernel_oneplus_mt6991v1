@@ -261,20 +261,17 @@ EXPORT_SYMBOL(padata_do_parallel);
  *   be parallel processed by another cpu and is not yet present in
  *   the cpu's reorder queue.
  */
-static struct padata_priv *padata_find_next(struct parallel_data *pd,
-					    bool remove_object)
+static struct padata_priv *padata_find_next(struct parallel_data *pd, int cpu,
+					    unsigned int processed)
 {
 	struct padata_priv *padata;
 	struct padata_list *reorder;
-	int cpu = pd->cpu;
 
 	reorder = per_cpu_ptr(pd->reorder_list, cpu);
 
 	spin_lock(&reorder->lock);
-	if (list_empty(&reorder->list)) {
-		spin_unlock(&reorder->lock);
-		return NULL;
-	}
+	if (list_empty(&reorder->list))
+		goto notfound;
 
 	padata = list_entry(reorder->list.next, struct padata_priv, list);
 
@@ -297,51 +294,40 @@ static struct padata_priv *padata_find_next(struct parallel_data *pd,
 			pd->cpu = cpumask_next_wrap(cpu, pd->cpumask.pcpu, -1, false);
 	}
 
+	list_del_init(&padata->list);
 	spin_unlock(&reorder->lock);
 	return padata;
+
+notfound:
+	pd->processed = processed;
+	pd->cpu = cpu;
+	spin_unlock(&reorder->lock);
+	return NULL;
 }
 
-static void padata_reorder(struct parallel_data *pd)
+static void padata_reorder(struct padata_priv *padata)
 {
+	struct parallel_data *pd = padata->pd;
 	struct padata_instance *pinst = pd->ps->pinst;
-	int cb_cpu;
-	struct padata_priv *padata;
-	struct padata_serial_queue *squeue;
-	struct padata_list *reorder;
+	unsigned int processed;
+	int cpu;
 
-	/*
-	 * We need to ensure that only one cpu can work on dequeueing of
-	 * the reorder queue the time. Calculating in which percpu reorder
-	 * queue the next object will arrive takes some time. A spinlock
-	 * would be highly contended. Also it is not clear in which order
-	 * the objects arrive to the reorder queues. So a cpu could wait to
-	 * get the lock just to notice that there is nothing to do at the
-	 * moment. Therefore we use a trylock and let the holder of the lock
-	 * care for all the objects enqueued during the holdtime of the lock.
-	 */
-	if (!spin_trylock_bh(&pd->lock))
-		return;
+	processed = pd->processed;
+	cpu = pd->cpu;
 
-	while (1) {
-		padata = padata_find_next(pd, true);
+	do {
+		struct padata_serial_queue *squeue;
+		int cb_cpu;
 
-		/*
-		 * If the next object that needs serialization is parallel
-		 * processed by another cpu and is still on it's way to the
-		 * cpu's reorder queue, nothing to do for now.
-		 */
-		if (!padata)
-			break;
+		cpu = cpumask_next_wrap(cpu, pd->cpumask.pcpu, -1, false);
+		processed++;
 
 		cb_cpu = padata->cb_cpu;
 		squeue = per_cpu_ptr(pd->squeue, cb_cpu);
 
 		spin_lock(&squeue->serial.lock);
 		list_add_tail(&padata->list, &squeue->serial.list);
-		spin_unlock(&squeue->serial.lock);
-
 		queue_work_on(cb_cpu, pinst->serial_wq, &squeue->work);
-	}
 
 	spin_unlock_bh(&pd->lock);
 
@@ -427,6 +413,7 @@ void padata_do_serial(struct padata_priv *padata)
 	struct padata_list *reorder = per_cpu_ptr(pd->reorder_list, hashed_cpu);
 	struct padata_priv *cur;
 	struct list_head *pos;
+	bool gotit = true;
 
 	spin_lock(&reorder->lock);
 	/* Sort in ascending order of sequence number. */
@@ -436,17 +423,14 @@ void padata_do_serial(struct padata_priv *padata)
 		if ((signed int)(cur->seq_nr - padata->seq_nr) < 0)
 			break;
 	}
-	list_add(&padata->list, pos);
+	if (padata->seq_nr != pd->processed) {
+		gotit = false;
+		list_add(&padata->list, pos);
+	}
 	spin_unlock(&reorder->lock);
 
-	/*
-	 * Ensure the addition to the reorder list is ordered correctly
-	 * with the trylock of pd->lock in padata_reorder.  Pairs with smp_mb
-	 * in padata_reorder.
-	 */
-	smp_mb();
-
-	padata_reorder(pd);
+	if (gotit)
+		padata_reorder(padata);
 }
 EXPORT_SYMBOL(padata_do_serial);
 
@@ -633,9 +617,7 @@ static struct parallel_data *padata_alloc_pd(struct padata_shell *ps)
 	padata_init_squeues(pd);
 	pd->seq_nr = -1;
 	refcount_set(&pd->refcnt, 1);
-	spin_lock_init(&pd->lock);
 	pd->cpu = cpumask_first(pd->cpumask.pcpu);
-	INIT_WORK(&pd->reorder_work, invoke_padata_reorder);
 
 	return pd;
 

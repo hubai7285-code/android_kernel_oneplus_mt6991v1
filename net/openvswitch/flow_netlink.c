@@ -2790,6 +2790,7 @@ static int validate_and_copy_set_tun(const struct nlattr *attr,
 
 static bool validate_push_nsh(const struct nlattr *attr, bool log)
 {
+	struct nlattr *nsh_key = nla_data(a);
 	struct sw_flow_match match;
 	struct sw_flow_key key;
 
@@ -2931,6 +2932,8 @@ static int validate_set(const struct nlattr *a,
 
 	case OVS_KEY_ATTR_MPLS:
 		if (!eth_p_mpls(eth_type))
+			return -EINVAL;
+		if (key_len != sizeof(struct ovs_key_mpls))
 			return -EINVAL;
 		break;
 
