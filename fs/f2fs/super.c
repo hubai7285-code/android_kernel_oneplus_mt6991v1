@@ -111,17 +111,11 @@ int f2fs_build_fault_attr(struct f2fs_sb_info *sbi, unsigned long rate,
 {
 	struct f2fs_fault_info *ffi = &F2FS_OPTION(sbi).fault_info;
 
-	if (fo & FAULT_ALL) {
-		memset(ffi, 0, sizeof(struct f2fs_fault_info));
-		return 0;
-	}
-
-	if (fo & FAULT_RATE) {
+	if (rate) {
 		if (rate > INT_MAX)
 			return -EINVAL;
 		atomic_set(&ffi->inject_ops, 0);
 		ffi->inject_rate = (int)rate;
-		f2fs_info(sbi, "build fault injection rate: %lu", rate);
 	}
 
 	if (type) {
@@ -964,7 +958,8 @@ static int parse_options(struct super_block *sb, char *options, bool is_remount)
 		case Opt_fault_injection:
 			if (args->from && match_int(args, &arg))
 				return -EINVAL;
-			if (f2fs_build_fault_attr(sbi, arg, 0, FAULT_RATE))
+			if (f2fs_build_fault_attr(sbi, arg,
+					F2FS_ALL_FAULT_TYPE))
 				return -EINVAL;
 			set_opt(sbi, FAULT_INJECTION);
 			break;
@@ -1746,7 +1741,7 @@ static void f2fs_put_super(struct super_block *sb)
 	}
 
 	/* be sure to wait for any on-going discard commands */
-	done = f2fs_issue_discard_timeout(sbi, true);
+	done = f2fs_issue_discard_timeout(sbi);
 	if (f2fs_realtime_discard_enable(sbi) && !sbi->discard_blks && done) {
 		struct cp_control cpc = {
 			.reason = CP_UMOUNT | CP_TRIMMED,
@@ -1774,6 +1769,14 @@ static void f2fs_put_super(struct super_block *sb)
 		truncate_inode_pages_final(META_MAPPING(sbi));
 	}
 
+	for (i = 0; i < NR_COUNT_TYPE; i++) {
+		if (!get_pages(sbi, i))
+			continue;
+		f2fs_err(sbi, "detect filesystem reference count leak during "
+			"umount, type: %d, count: %lld", i, get_pages(sbi, i));
+		f2fs_bug_on(sbi, 1);
+	}
+
 	f2fs_bug_on(sbi, sbi->fsync_node_num);
 
 	f2fs_destroy_compress_inode(sbi);
@@ -1783,15 +1786,6 @@ static void f2fs_put_super(struct super_block *sb)
 
 	iput(sbi->meta_inode);
 	sbi->meta_inode = NULL;
-
-	/* Should check the page counts after dropping all node/meta pages */
-	for (i = 0; i < NR_COUNT_TYPE; i++) {
-		if (!get_pages(sbi, i))
-			continue;
-		f2fs_err(sbi, "detect filesystem reference count leak during "
-			"umount, type: %d, count: %lld", i, get_pages(sbi, i));
-		f2fs_bug_on(sbi, 1);
-	}
 
 	/*
 	 * iput() can update stat information, if f2fs_write_checkpoint()
@@ -1815,6 +1809,7 @@ static void f2fs_put_super(struct super_block *sb)
 	kfree(sbi->raw_super);
 
 	f2fs_destroy_page_array_cache(sbi);
+	f2fs_destroy_xattr_caches(sbi);
 #ifdef CONFIG_QUOTA
 	for (i = 0; i < MAXQUOTAS; i++)
 		kfree(F2FS_OPTION(sbi).s_qf_names[i]);
@@ -1891,7 +1886,7 @@ static int f2fs_unfreeze(struct super_block *sb)
 	 * will recover after removal of snapshot.
 	 */
 	if (test_opt(sbi, DISCARD) && !f2fs_hw_support_discard(sbi))
-		f2fs_issue_discard_timeout(sbi, true);
+		f2fs_issue_discard_timeout(sbi);
 
 	clear_sbi_flag(F2FS_SB(sb), SBI_IS_FREEZING);
 	return 0;
@@ -2385,17 +2380,12 @@ static int f2fs_disable_checkpoint(struct f2fs_sb_info *sbi)
 
 	/* check if we need more GC first */
 	unusable = f2fs_get_unusable_blocks(sbi);
-
-	f2fs_info(sbi, "%s starts, unusable: %u", __func__, unusable);
-
 	if (!f2fs_disable_cp_again(sbi, unusable))
 		goto skip_gc;
 
 	f2fs_update_time(sbi, DISABLE_TIME);
 
 	sbi->gc_mode = GC_URGENT_HIGH;
-
-	f2fs_info(sbi, "%s: run f2fs_gc() to migrate blocks", __func__);
 
 	while (!f2fs_time_over(sbi, DISABLE_TIME)) {
 		struct f2fs_gc_control gc_control = {
@@ -2417,12 +2407,6 @@ static int f2fs_disable_checkpoint(struct f2fs_sb_info *sbi)
 			break;
 	}
 
-	f2fs_info(sbi, "%s: call sync_filesystem() to persist meta: %lld, node: %lld, data: %lld",
-			__func__,
-			get_pages(sbi, F2FS_DIRTY_META),
-			get_pages(sbi, F2FS_DIRTY_NODES),
-			get_pages(sbi, F2FS_DIRTY_DATA));
-
 	ret = sync_filesystem(sbi->sb);
 	if (ret || err) {
 		err = ret ? ret : err;
@@ -2436,12 +2420,6 @@ static int f2fs_disable_checkpoint(struct f2fs_sb_info *sbi)
 	}
 
 skip_gc:
-	f2fs_info(sbi, "%s: call f2fs_write_checkpoint(), meta: %lld, node: %lld, data: %lld",
-			__func__,
-			get_pages(sbi, F2FS_DIRTY_META),
-			get_pages(sbi, F2FS_DIRTY_NODES),
-			get_pages(sbi, F2FS_DIRTY_DATA));
-
 	f2fs_down_write_trace(&sbi->gc_lock, &lc);
 	cpc.reason = CP_PAUSE;
 	set_sbi_flag(sbi, SBI_CP_DISABLED);
@@ -2459,7 +2437,7 @@ out_unlock:
 restore_flag:
 	sbi->gc_mode = gc_mode;
 	sbi->sb->s_flags = s_flags;	/* Restore SB_RDONLY status */
-	f2fs_info(sbi, "%s finishes, err:%d", __func__, err);
+	f2fs_info(sbi, "f2fs_disable_checkpoint() finish, err:%d", err);
 	return err;
 }
 
@@ -2742,12 +2720,7 @@ static int f2fs_remount(struct super_block *sb, int *flags, char *data)
 			need_stop_discard = true;
 		} else {
 			f2fs_stop_discard_thread(sbi);
-			/*
-			 * f2fs_ioc_fitrim() won't race w/ "remount ro"
-			 * so it's safe to check discard_cmd_cnt in
-			 * f2fs_issue_discard_timeout().
-			 */
-			f2fs_issue_discard_timeout(sbi, *flags & SB_RDONLY);
+			f2fs_issue_discard_timeout(sbi);
 			need_restart_discard = true;
 		}
 	}
@@ -3512,27 +3485,24 @@ static bool f2fs_has_stable_inodes(struct super_block *sb)
 	return true;
 }
 
-static unsigned int
-f2fs_get_devices(struct super_block *sb,
-		 struct block_device *devs[FSCRYPT_MAX_DEVICES])
+static struct block_device **f2fs_get_devices(struct super_block *sb,
+					      unsigned int *num_devs)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(sb);
-	int ndevs;
+	struct block_device **devs;
 	int i;
 
-	static_assert(MAX_DEVICES <= FSCRYPT_MAX_DEVICES);
+	if (!f2fs_is_multi_device(sbi))
+		return NULL;
 
-	if (!f2fs_is_multi_device(sbi)) {
-		devs[0] = sb->s_bdev;
-		return 1;
-	}
-	ndevs = sbi->s_ndevs;
-	if (WARN_ON_ONCE(ndevs > FSCRYPT_MAX_DEVICES))
-		ndevs = FSCRYPT_MAX_DEVICES;
+	devs = kmalloc_array(sbi->s_ndevs, sizeof(*devs), GFP_KERNEL);
+	if (!devs)
+		return ERR_PTR(-ENOMEM);
 
-	for (i = 0; i < ndevs; i++)
+	for (i = 0; i < sbi->s_ndevs; i++)
 		devs[i] = FDEV(i).bdev;
-	return ndevs;
+	*num_devs = sbi->s_ndevs;
+	return devs;
 }
 
 static const struct fscrypt_operations f2fs_cryptops = {
@@ -3545,7 +3515,7 @@ static const struct fscrypt_operations f2fs_cryptops = {
 	.get_dummy_policy	= f2fs_get_dummy_policy,
 	.empty_dir		= f2fs_empty_dir,
 	.has_stable_inodes	= f2fs_has_stable_inodes,
-	.get_devices_new	= f2fs_get_devices,
+	.get_devices		= f2fs_get_devices,
 };
 #endif
 
@@ -4418,7 +4388,48 @@ void f2fs_save_errors(struct f2fs_sb_info *sbi, unsigned char flag)
 	spin_unlock_irqrestore(&sbi->error_lock, flags);
 }
 
+static bool f2fs_update_errors(struct f2fs_sb_info *sbi)
+{
+	unsigned long flags;
+	bool need_update = false;
+
+	spin_lock_irqsave(&sbi->error_lock, flags);
+	if (sbi->error_dirty) {
+		memcpy(F2FS_RAW_SUPER(sbi)->s_errors, sbi->errors,
+							MAX_F2FS_ERRORS);
+		sbi->error_dirty = false;
+		need_update = true;
+	}
+	spin_unlock_irqrestore(&sbi->error_lock, flags);
+
+	return need_update;
+}
+
+static void f2fs_record_errors(struct f2fs_sb_info *sbi, unsigned char error)
+{
+	int err;
+
+	f2fs_down_write(&sbi->sb_lock);
+
+	if (!f2fs_update_errors(sbi))
+		goto out_unlock;
+
+	err = f2fs_commit_super(sbi, false);
+	if (err)
+		f2fs_err_ratelimited(sbi,
+			"f2fs_commit_super fails to record errors:%u, err:%d",
+			error, err);
+out_unlock:
+	f2fs_up_write(&sbi->sb_lock);
+}
+
 void f2fs_handle_error(struct f2fs_sb_info *sbi, unsigned char error)
+{
+	f2fs_save_errors(sbi, error);
+	f2fs_record_errors(sbi, error);
+}
+
+void f2fs_handle_error_async(struct f2fs_sb_info *sbi, unsigned char error)
 {
 	f2fs_save_errors(sbi, error);
 
@@ -4815,9 +4826,13 @@ try_onemore:
 	if (err)
 		goto free_iostat;
 
-	err = f2fs_init_page_array_cache(sbi);
+	/* init per sbi slab cache */
+	err = f2fs_init_xattr_caches(sbi);
 	if (err)
 		goto free_percpu;
+	err = f2fs_init_page_array_cache(sbi);
+	if (err)
+		goto free_xattr_cache;
 
 	/* get an inode for meta space */
 	sbi->meta_inode = f2fs_iget(sb, F2FS_META_INO(sbi));
@@ -5021,15 +5036,11 @@ try_onemore:
 		}
 	} else {
 		err = f2fs_recover_fsync_data(sbi, true);
-		if (err > 0) {
-			if (!f2fs_readonly(sb)) {
-				f2fs_err(sbi, "Need to recover fsync data");
-				err = -EINVAL;
-				goto free_meta;
-			} else {
-				f2fs_info(sbi, "drop all fsynced data");
-				err = 0;
-			}
+
+		if (!f2fs_readonly(sb) && err > 0) {
+			err = -EINVAL;
+			f2fs_err(sbi, "Need to recover fsync data");
+			goto free_meta;
 		}
 	}
 
@@ -5151,6 +5162,8 @@ free_meta_inode:
 	sbi->meta_inode = NULL;
 free_page_array_cache:
 	f2fs_destroy_page_array_cache(sbi);
+free_xattr_cache:
+	f2fs_destroy_xattr_caches(sbi);
 free_percpu:
 	destroy_percpu_info(sbi);
 free_iostat:
@@ -5318,15 +5331,10 @@ static int __init init_f2fs_fs(void)
 	err = f2fs_create_casefold_cache();
 	if (err)
 		goto free_compress_cache;
-	err = f2fs_init_xattr_cache();
-	if (err)
-		goto free_casefold_cache;
 	err = register_filesystem(&f2fs_fs_type);
 	if (err)
-		goto free_xattr_cache;
+		goto free_casefold_cache;
 	return 0;
-free_xattr_cache:
-	f2fs_destroy_xattr_cache();
 free_casefold_cache:
 	f2fs_destroy_casefold_cache();
 free_compress_cache:
@@ -5367,7 +5375,6 @@ fail:
 static void __exit exit_f2fs_fs(void)
 {
 	unregister_filesystem(&f2fs_fs_type);
-	f2fs_destroy_xattr_cache();
 	f2fs_destroy_casefold_cache();
 	f2fs_destroy_compress_cache();
 	f2fs_destroy_compress_mempool();
