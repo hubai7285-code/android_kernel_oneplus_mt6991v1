@@ -3314,11 +3314,8 @@ static int f2fs_do_zero_range(struct dnode_of_data *dn, pgoff_t start,
 		f2fs_set_data_blkaddr(dn, NEW_ADDR);
 	}
 
-	if (index > start) {
-		f2fs_update_read_extent_cache_range(dn, start, 0,
-							index - start);
-		f2fs_update_age_extent_cache_range(dn, start, index - start);
-	}
+	f2fs_update_read_extent_cache_range(dn, start, 0, index - start);
+	f2fs_update_age_extent_cache_range(dn, start, index - start);
 
 	return ret;
 }
@@ -3552,15 +3549,8 @@ static int f2fs_expand_inode_data(struct inode *inode, loff_t offset,
 
 	if (f2fs_is_pinned_file(inode)) {
 		block_t sec_blks = CAP_BLKS_PER_SEC(sbi);
-		block_t sec_len;
+		block_t sec_len = roundup(map.m_len, sec_blks);
 
-		if (map.m_lblk % sec_blks) {
-			map.m_lblk = rounddown(map.m_lblk, sec_blks);
-			map.m_len = pg_end - map.m_lblk;
-			if (off_end)
-				map.m_len++;
-		}
-		sec_len = roundup(map.m_len, sec_blks);
 		map.m_len = sec_blks;
 next_alloc:
 		f2fs_down_write(&sbi->pin_sem);
@@ -3839,9 +3829,8 @@ static int f2fs_setflags_common(struct inode *inode, u32 iflags, u32 mask)
 				return -EOPNOTSUPP;
 			f2fs_down_write(&fi->i_sem);
 			if (!f2fs_may_compress(inode) ||
-				atomic_read(&fi->writeback) ||
-				(S_ISREG(inode->i_mode) &&
-				F2FS_HAS_BLOCKS(inode))) {
+					(S_ISREG(inode->i_mode) &&
+					F2FS_HAS_BLOCKS(inode))) {
 				f2fs_up_write(&fi->i_sem);
 				return -EINVAL;
 			}
@@ -5282,7 +5271,6 @@ static int f2fs_ioc_set_pin_file(struct file *filp, unsigned long arg)
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	__u32 pin;
 	int ret = 0;
-	bool allow_pin_big_file = false;
 
 	if (get_user(pin, (__u32 __user *)arg))
 		return -EFAULT;
@@ -5315,9 +5303,7 @@ static int f2fs_ioc_set_pin_file(struct file *filp, unsigned long arg)
 		goto done;
 	}
 
-	trace_android_vh_f2fs_ioc_set_pin_file(inode, f2fs_sb_has_blkzoned(sbi),
-						&allow_pin_big_file);
-	if (!allow_pin_big_file && F2FS_HAS_BLOCKS(inode)) {
+	if (F2FS_HAS_BLOCKS(inode)) {
 		ret = -EFBIG;
 		goto out;
 	}
