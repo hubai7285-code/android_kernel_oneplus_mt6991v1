@@ -220,6 +220,9 @@ DECLARE_HOOK(android_vh_mem_cgroup_css_online,
 DECLARE_HOOK(android_vh_mem_cgroup_css_offline,
 	TP_PROTO(struct cgroup_subsys_state *css, struct mem_cgroup *memcg),
 	TP_ARGS(css, memcg));
+DECLARE_HOOK(android_vh_mem_cgroup_handle_over_high,
+	TP_PROTO(bool *record_psi),
+	TP_ARGS(record_psi));
 DECLARE_HOOK(android_vh_refault_filemap_add_folio,
 	TP_PROTO(struct folio *folio, void *shadow, gfp_t gfp, int *ret),
 	TP_ARGS(folio, shadow, gfp, ret));
@@ -527,6 +530,9 @@ DECLARE_HOOK(android_vh_filemap_map_pages,
 DECLARE_HOOK(android_vh_thaw_killed_process,
 	TP_PROTO(bool *thaw),
 	TP_ARGS(thaw));
+DECLARE_HOOK(android_vh_page_cache_read,
+	TP_PROTO(struct inode *inode, pgoff_t index, unsigned long count),
+	TP_ARGS(inode, index, count));
 DECLARE_HOOK(android_vh_page_cache_readahead_start,
 	TP_PROTO(struct file *file, pgoff_t pgoff,
 		unsigned int size, bool sync),
@@ -651,6 +657,9 @@ DECLARE_HOOK(android_vh_reuse_whole_anon_folio,
 DECLARE_HOOK(android_vh_alloc_swap_slot_cache,
 	TP_PROTO(void *cache),
 	TP_ARGS(cache));
+DECLARE_RESTRICTED_HOOK(android_rvh_alloc_swap_slot_cache,
+	TP_PROTO(void *cache, swp_entry_t *entry, bool *bypass),
+	TP_ARGS(cache, entry, bypass), 1);
 DECLARE_HOOK(android_vh_calculate_totalreserve_pages,
 	TP_PROTO(bool *skip),
 	TP_ARGS(skip));
