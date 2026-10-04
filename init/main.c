@@ -817,6 +817,7 @@ static inline void initcall_debug_enable(void)
 #ifdef CONFIG_RANDOMIZE_KSTACK_OFFSET
 DEFINE_STATIC_KEY_MAYBE_RO(CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT,
 			   randomize_kstack_offset);
+DEFINE_PER_CPU(u32, kstack_offset);
 
 static int __init early_randomize_kstack_offset(char *buf)
 {
@@ -1002,9 +1003,6 @@ void start_kernel(void)
 	boot_cpu_init();
 	page_address_init();
 	pr_notice("%s", linux_banner);
-#ifdef CONFIG_GKI_DYNAMIC_TASK_STRUCT_SIZE
-	setup_arch_task_struct_size();
-#endif
 	early_security_init();
 	setup_arch(&command_line);
 	setup_boot_config();

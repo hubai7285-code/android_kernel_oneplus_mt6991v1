@@ -166,6 +166,26 @@ DECLARE_HOOK(android_vh_mm_customize_pgdat_balanced,
 DECLARE_HOOK(android_vh_mm_customize_file_is_tiny,
 	TP_PROTO(unsigned int may_swap, int order, int highest_zoneidx, bool *file_is_tiny),
 	TP_ARGS(may_swap, order, highest_zoneidx, file_is_tiny));
+DECLARE_RESTRICTED_HOOK(android_rvh_shrink_spec_lru,
+	TP_PROTO(struct lruvec *lruvec, struct scan_control *sc,
+		 unsigned long *nr_reclaimed, unsigned long nr_to_reclaim,
+		 bool proportional_reclaim, const unsigned long *nr,
+		 bool *skip),
+	TP_ARGS(lruvec, sc, nr_reclaimed, nr_to_reclaim,
+		proportional_reclaim, nr, skip), 1);
+
+DECLARE_HOOK(android_vh_handle_folio_writeback,
+	TP_PROTO(struct folio *folio, bool *bypass),
+	TP_ARGS(folio, bypass));
+
+DECLARE_HOOK(android_vh_mm_get_zone_mark,
+	TP_PROTO(struct zone *zone, unsigned long *mark),
+	TP_ARGS(zone, mark));
+
+DECLARE_HOOK(android_vh_reclaim_before_kswapd,
+	TP_PROTO(unsigned long *nr_reclaimed),
+	TP_ARGS(nr_reclaimed));
+
 #endif /* _TRACE_HOOK_VMSCAN_H */
 /* This part must be outside protection */
 #include <trace/define_trace.h>
