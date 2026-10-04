@@ -12,6 +12,7 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/hooks/vendor_hooks.h>
+#include <trace/hooks/rcu.h>
 #include <linux/tracepoint.h>
 
 #include <trace/hooks/binder.h>
